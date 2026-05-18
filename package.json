@@ -1,0 +1,47 @@
+{
+  "name": "@zhafron/opencode-multi-kiro",
+  "version": "0.1.0",
+  "description": "OpenCode plugin for multi-account Kiro with automatic rotation and usage tracking",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "bunx tsc -p tsconfig.build.json",
+    "prepack": "bun run build",
+    "test": "bun test ./test/*.ts",
+    "typecheck": "bunx tsc --noEmit -p tsconfig.json"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "kiro",
+    "multi-account",
+    "aws",
+    "claude",
+    "rotation"
+  ],
+  "author": "tickernelz",
+  "license": "MIT",
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.14.39",
+    "bun-types": "latest",
+    "typescript": "^5.9.3"
+  },
+  "opencode": {
+    "type": "plugin",
+    "hooks": [
+      "auth",
+      "config"
+    ]
+  }
+}
