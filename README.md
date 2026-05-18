@@ -1,7 +1,7 @@
 # opencode-multi-kiro
 
-[![npm version](https://img.shields.io/npm/v/@zhafron/opencode-multi-kiro)](https://www.npmjs.com/package/@zhafron/opencode-multi-kiro)
-[![license](https://img.shields.io/npm/l/@zhafron/opencode-multi-kiro)](./LICENSE)
+[![npm version](https://img.shields.io/npm/v/@firdyfirdy/opencode-multi-kiro)](https://www.npmjs.com/package/@firdyfirdy/opencode-multi-kiro)
+[![license](https://img.shields.io/npm/l/@firdyfirdy/opencode-multi-kiro)](./LICENSE)
 
 OpenCode plugin for multi-account Kiro with automatic rotation, usage tracking, and account management.
 
@@ -22,7 +22,7 @@ Add the plugin to your `opencode.json` plugin array:
 ```json
 {
   "plugin": [
-    "@zhafron/opencode-multi-kiro"
+    "@firdyfirdy/opencode-multi-kiro"
   ]
 }
 ```
@@ -30,7 +30,7 @@ Add the plugin to your `opencode.json` plugin array:
 Then install:
 
 ```bash
-npm install @zhafron/opencode-multi-kiro
+npm install @firdyfirdy/opencode-multi-kiro
 ```
 
 ## Setup
@@ -65,7 +65,7 @@ npm install @zhafron/opencode-multi-kiro
    ```json
    {
       "plugin": [
-        "@zhafron/opencode-multi-kiro"
+        "@firdyfirdy/opencode-multi-kiro"
       ],
       "multi-kiro": {
         "strategy": "hybrid"
@@ -132,4 +132,4 @@ Use a local file path in your `opencode.json` for development:
 
 ## Author
 
-tickernelz
+firdyfirdy

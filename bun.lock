@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "@zhafron/opencode-multi-kiro",
+      "name": "@firdyfirdy/opencode-multi-kiro",
       "devDependencies": {
         "@opencode-ai/plugin": "^1.14.39",
         "bun-types": "latest",

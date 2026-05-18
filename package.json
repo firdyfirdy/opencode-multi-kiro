@@ -1,5 +1,5 @@
 {
-  "name": "@zhafron/opencode-multi-kiro",
+  "name": "@firdyfirdy/opencode-multi-kiro",
   "version": "0.1.0",
   "description": "OpenCode plugin for multi-account Kiro with automatic rotation and usage tracking",
   "type": "module",
@@ -30,7 +30,7 @@
     "claude",
     "rotation"
   ],
-  "author": "tickernelz",
+  "author": "firdyfirdy",
   "license": "MIT",
   "devDependencies": {
     "@opencode-ai/plugin": "^1.14.39",

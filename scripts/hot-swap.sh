@@ -6,7 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-PLUGIN_NAME="@zhafron/opencode-multi-kiro"
+PLUGIN_NAME="@firdyfirdy/opencode-multi-kiro"
 CACHE_BASE="$HOME/.cache/opencode/packages"
 PLUGIN_DIR="$CACHE_BASE/$PLUGIN_NAME@latest/node_modules/$PLUGIN_NAME"
 
