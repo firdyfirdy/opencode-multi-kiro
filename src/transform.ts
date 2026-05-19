@@ -106,6 +106,12 @@ export function transformRequest(body: string | any, account: Account): any {
     systemPrompt = thinkingPrefix + systemPrompt
   }
 
+  // Append large-file safety instruction to prevent output token truncation
+  const largeFileSafetyInstruction = `\n\n<system-reminder>
+CRITICAL: When writing or creating files with content larger than 8KB (approximately 200+ lines or large JSON/data), you MUST use the bash tool with a heredoc or a script (e.g., python3/node) to generate the file instead of the write/edit tool directly. This prevents output token truncation that causes tool call failures. For smaller files (<8KB), use write/edit tools normally.
+</system-reminder>`
+  systemPrompt += largeFileSafetyInstruction
+
   // Build history + current message
   const { history, currentContent, currentToolResults } = buildConversation(nonSystemMessages)
 
@@ -428,281 +434,201 @@ function safeParseJson(str: string | undefined): any {
  * Kiro returns a proprietary binary stream with embedded JSON objects.
  * We scan for JSON patterns and extract them using brace counting.
  */
+/**
+ * Parse one AWS Event Stream message from buffer at given offset.
+ * Returns { payload, nextOffset } or null if incomplete.
+ */
+function parseOneMessage(buf: Uint8Array, offset: number): { payload: string; nextOffset: number } | null {
+  if (offset + 12 > buf.length) return null
+
+  const totalLength =
+    ((buf[offset] & 0xFF) << 24) |
+    ((buf[offset + 1] & 0xFF) << 16) |
+    ((buf[offset + 2] & 0xFF) << 8) |
+    (buf[offset + 3] & 0xFF)
+
+  if (totalLength < 16 || totalLength > 64 * 1024 * 1024) return null
+  if (offset + totalLength > buf.length) return null
+
+  const headersLength =
+    ((buf[offset + 4] & 0xFF) << 24) |
+    ((buf[offset + 5] & 0xFF) << 16) |
+    ((buf[offset + 6] & 0xFF) << 8) |
+    (buf[offset + 7] & 0xFF)
+
+  const payloadStart = offset + 12 + headersLength
+  const payloadEnd = offset + totalLength - 4
+
+  if (payloadStart >= payloadEnd || payloadEnd > buf.length) {
+    return { payload: "", nextOffset: offset + totalLength }
+  }
+
+  const payload = new TextDecoder().decode(buf.slice(payloadStart, payloadEnd))
+  return { payload, nextOffset: offset + totalLength }
+}
+
+/**
+ * Transform Kiro event-stream response into OpenAI-compatible SSE stream.
+ * Properly decodes AWS Event Stream binary framing.
+ */
 export function transformResponseStream(kiroResponse: Response, model: string): Response {
   const reader = kiroResponse.body?.getReader()
   if (!reader) {
     return new Response(JSON.stringify({ error: "No response body" }), { status: 502 })
   }
 
-  const encoder = new TextEncoder()
-  const decoder = new TextDecoder()
   const conversationId = `chatcmpl-${crypto.randomUUID().slice(0, 8)}`
+  const encoder = new TextEncoder()
 
-  let buffer = ""
-  let toolCallIndex = 0
-
-  // Accumulate tool calls: Kiro streams name, then input chunks, then stop
-  interface PendingToolCall {
-    index: number
-    id: string
-    name: string
-    input: string
-  }
-  let pendingToolCall: PendingToolCall | null = null
-
-  function flushBuffer(): any[] {
-    const results: any[] = []
-
-    const patterns = [
-      '{"content":',
-      '{"name":',
-      '{"input":',
-      '{"stop":',
-      '{"usage":',
-      '{"contextUsagePercentage":',
-      '{"unit":',
-    ]
-
-    let safety = 0
-    while (safety++ < 1000) {
-      let earliest = -1
-      for (const pat of patterns) {
-        const idx = buffer.indexOf(pat)
-        if (idx !== -1 && (earliest === -1 || idx < earliest)) {
-          earliest = idx
-        }
-      }
-
-      if (earliest === -1) break
-
-      const end = findMatchingBrace(buffer, earliest)
-      if (end === -1) break
-
-      const jsonStr = buffer.slice(earliest, end + 1)
-      buffer = buffer.slice(end + 1)
-
-      try {
-        const event = JSON.parse(jsonStr)
-        const chunk = eventToOpenAIChunk(event)
-        if (chunk) results.push(chunk)
-      } catch {}
-    }
-
-    return results
-  }
-
-  function eventToOpenAIChunk(event: any): any | null {
-    const created = Math.floor(Date.now() / 1000)
-
-    // Content event - emit immediately
-    if (event.content !== undefined && !event.name && !event.toolUseId) {
-      return {
-        id: conversationId,
-        object: "chat.completion.chunk",
-        created,
-        model,
-        choices: [{
-          index: 0,
-          delta: { content: event.content },
-          finish_reason: null,
-        }],
-      }
-    }
-
-    // Tool use event: every chunk has name + toolUseId + input
-    // Accumulate input until toolUseId changes or stop event
-    if (event.toolUseId && event.name) {
-      if (!pendingToolCall || pendingToolCall.id !== event.toolUseId) {
-        // New tool call - flush previous if exists
-        const flushed = flushPendingToolCall()
-        pendingToolCall = {
-          index: toolCallIndex++,
-          id: event.toolUseId,
-          name: event.name,
-          input: event.input || "",
-        }
-        return flushed
-      } else {
-        // Same tool call - accumulate input
-        pendingToolCall.input += event.input || ""
-        return null
-      }
-    }
-
-    // Stop event
-    if (event.stop !== undefined) {
-      return flushPendingToolCall()
-    }
-
-    // Usage/metering events - skip
-    if (event.usage !== undefined || event.contextUsagePercentage !== undefined || event.unit !== undefined) return null
-
-    // Content with modelId (assistantResponseEvent style)
-    if (event.content !== undefined) {
-      return {
-        id: conversationId,
-        object: "chat.completion.chunk",
-        created,
-        model,
-        choices: [{
-          index: 0,
-          delta: { content: event.content },
-          finish_reason: null,
-        }],
-      }
-    }
-
-    return null
-  }
-
-  function flushPendingToolCall(): any | null {
-    if (!pendingToolCall) return null
-    const tc = pendingToolCall
-    pendingToolCall = null
-
-    let args = tc.input
-    // Validate JSON
-    try {
-      JSON.parse(args)
-    } catch {
-      // If not valid JSON, wrap it
-      if (args) {
-        args = JSON.stringify({ raw: args })
-      } else {
-        args = "{}"
-      }
-    }
-
-    return {
-      id: conversationId,
-      object: "chat.completion.chunk",
-      created: Math.floor(Date.now() / 1000),
-      model,
-      choices: [{
-        index: 0,
-        delta: {
-          tool_calls: [{
-            index: tc.index,
-            id: tc.id,
-            type: "function",
-            function: { name: tc.name, arguments: args },
-          }],
-        },
-        finish_reason: null,
-      }],
-    }
-  }
-
-  function makeStopChunk(): any {
-    return {
-      id: conversationId,
-      object: "chat.completion.chunk",
-      created: Math.floor(Date.now() / 1000),
-      model,
-      choices: [{
-        index: 0,
-        delta: {},
-        finish_reason: toolCallIndex > 0 ? "tool_calls" : "stop",
-      }],
-    }
+  function sse(obj: any): Uint8Array {
+    return encoder.encode("data: " + JSON.stringify(obj) + "\n\n")
   }
 
   const stream = new ReadableStream({
     async start(controller) {
       try {
+        let binaryBuf = new Uint8Array(0)
+        let textContent = ""
+        const toolCalls: Array<{ id: string; name: string; input: string; inputObj?: Record<string, any> }> = []
+        let curTool: { id: string; name: string; input: string; inputObj?: Record<string, any> } | null = null
+
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
 
-          const rawChunk = decoder.decode(value, { stream: true })
-          buffer += rawChunk
+          const newBuf = new Uint8Array(binaryBuf.length + value.length)
+          newBuf.set(binaryBuf)
+          newBuf.set(value, binaryBuf.length)
+          binaryBuf = newBuf
 
-          const chunks = flushBuffer()
-          for (const chunk of chunks) {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`))
+          let offset = 0
+          while (offset + 12 <= binaryBuf.length) {
+            const totalLen = ((binaryBuf[offset] & 0xFF) << 24) | ((binaryBuf[offset+1] & 0xFF) << 16) | ((binaryBuf[offset+2] & 0xFF) << 8) | (binaryBuf[offset+3] & 0xFF)
+            if (totalLen < 16 || totalLen > 64 * 1024 * 1024) { offset++; continue }
+            if (offset + totalLen > binaryBuf.length) break
+
+            const headersLen = ((binaryBuf[offset+4] & 0xFF) << 24) | ((binaryBuf[offset+5] & 0xFF) << 16) | ((binaryBuf[offset+6] & 0xFF) << 8) | (binaryBuf[offset+7] & 0xFF)
+            const payloadStart = offset + 12 + headersLen
+            const payloadEnd = offset + totalLen - 4
+
+            if (payloadStart < payloadEnd && payloadEnd <= binaryBuf.length) {
+              const payloadStr = new TextDecoder().decode(binaryBuf.slice(payloadStart, payloadEnd))
+              if (payloadStr.startsWith("{")) {
+                try {
+                  const event = JSON.parse(payloadStr)
+
+                  if (event.content !== undefined && !event.toolUseId) {
+                    textContent += event.content
+                    // Stream text content immediately
+                    controller.enqueue(sse({
+                      id: conversationId, object: "chat.completion.chunk",
+                      created: Math.floor(Date.now() / 1000), model,
+                      choices: [{ index: 0, delta: { content: event.content }, finish_reason: null }],
+                    }))
+                  }
+
+                  if (event.toolUseId) {
+                    if (event.stop) {
+                      if (curTool) { toolCalls.push(curTool); curTool = null }
+                    } else if (curTool && curTool.id === event.toolUseId) {
+                      if (event.input !== undefined) {
+                        if (typeof event.input === "string") {
+                          curTool.input += event.input
+                        } else {
+                          // Merge object inputs instead of stringify+concatenate
+                          if (!curTool.inputObj) {
+                            // Parse existing input string into object if possible
+                            try { curTool.inputObj = curTool.input ? JSON.parse(curTool.input) : {} } catch { curTool.inputObj = {} }
+                          }
+                          Object.assign(curTool.inputObj!, event.input as Record<string, any>)
+                        }
+                      }
+                      if (event.name && !curTool.name) curTool.name = event.name
+                    } else {
+                      if (curTool) toolCalls.push(curTool)
+                      if (typeof event.input === "string") {
+                        curTool = {
+                          id: event.toolUseId,
+                          name: event.name || "",
+                          input: event.input,
+                        }
+                      } else {
+                        curTool = {
+                          id: event.toolUseId,
+                          name: event.name || "",
+                          input: "",
+                          inputObj: event.input !== undefined ? { ...event.input } : undefined,
+                        }
+                      }
+                    }
+                  }
+                } catch {}
+              }
+            }
+            offset += totalLen
+          }
+          if (offset > 0) binaryBuf = binaryBuf.slice(offset)
+        }
+
+        if (curTool) toolCalls.push(curTool)
+
+        // Emit tool calls incrementally (like OpenAI streaming)
+        const created = Math.floor(Date.now() / 1000)
+        for (let i = 0; i < toolCalls.length; i++) {
+          const tc = toolCalls[i]
+          // Resolve final args: prefer inputObj (merged objects), fallback to input string
+          let args: string
+          if (tc.inputObj) {
+            args = JSON.stringify(tc.inputObj)
+          } else {
+            args = tc.input || "{}"
+            try { JSON.parse(args) } catch { args = "{}" }
+          }
+
+          // First chunk: id + type + name + start of arguments
+          const CHUNK_SIZE = 512
+          const firstPiece = args.slice(0, CHUNK_SIZE)
+          controller.enqueue(sse({
+            id: conversationId, object: "chat.completion.chunk", created, model,
+            choices: [{ index: 0, delta: { tool_calls: [{ index: i, id: tc.id, type: "function", function: { name: tc.name, arguments: firstPiece } }] }, finish_reason: null }],
+          }))
+
+          // Subsequent chunks: only arguments continuation
+          for (let j = CHUNK_SIZE; j < args.length; j += CHUNK_SIZE) {
+            const piece = args.slice(j, j + CHUNK_SIZE)
+            controller.enqueue(sse({
+              id: conversationId, object: "chat.completion.chunk", created, model,
+              choices: [{ index: 0, delta: { tool_calls: [{ index: i, function: { arguments: piece } }] }, finish_reason: null }],
+            }))
           }
         }
 
-        // Flush remaining
-        const remaining = flushBuffer()
-        for (const chunk of remaining) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`))
-        }
-
-        // Flush any pending tool call that wasn't stopped
-        if (pendingToolCall) {
-          const toolChunk = flushPendingToolCall()
-          if (toolChunk) {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(toolChunk)}\n\n`))
-          }
-        }
-
-        // Send stop + done
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(makeStopChunk())}\n\n`))
+        // Stop chunk
+        controller.enqueue(sse({
+          id: conversationId, object: "chat.completion.chunk", created, model,
+          choices: [{ index: 0, delta: {}, finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop" }],
+        }))
         controller.enqueue(encoder.encode("data: [DONE]\n\n"))
         controller.close()
       } catch (err) {
         try {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(makeStopChunk())}\n\n`))
+          controller.enqueue(sse({
+            id: conversationId, object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000), model,
+            choices: [{ index: 0, delta: { content: `Error: ${err}` }, finish_reason: "stop" }],
+          }))
           controller.enqueue(encoder.encode("data: [DONE]\n\n"))
           controller.close()
-        } catch {
-          controller.error(err)
-        }
+        } catch { controller.error(err) }
       }
     },
-    cancel() {
-      reader.cancel()
-    },
+    cancel() { reader.cancel() },
   })
 
   return new Response(stream, {
     status: 200,
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      "Connection": "keep-alive",
-    },
+    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" },
   })
-}
-
-/**
- * Find the index of the matching closing brace for a JSON object starting at `start`.
- * Handles string escaping. Returns -1 if incomplete.
- */
-function findMatchingBrace(str: string, start: number): number {
-  let depth = 0
-  let inString = false
-  let escaped = false
-
-  for (let i = start; i < str.length; i++) {
-    const ch = str[i]
-
-    if (escaped) {
-      escaped = false
-      continue
-    }
-
-    if (ch === "\\") {
-      escaped = true
-      continue
-    }
-
-    if (ch === '"') {
-      inString = !inString
-      continue
-    }
-
-    if (inString) continue
-
-    if (ch === "{") depth++
-    else if (ch === "}") {
-      depth--
-      if (depth === 0) return i
-    }
-  }
-
-  return -1 // incomplete
 }
 
 // --- Usage/email fetch ---
