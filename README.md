@@ -6,6 +6,70 @@ The plugin runs directly inside the OpenCode process, intercepts OpenAI-compatib
 
 ---
 
+## ⚠️ Requirements
+
+- **OpenCode v1.15.0 or later** — older versions have incompatible plugin API
+- **kiro-cli** — for account authentication
+
+```bash
+# Check your OpenCode version
+opencode --version
+
+# Upgrade if needed
+opencode upgrade
+```
+
+---
+
+## Quick Start
+
+### 1. Install kiro-cli
+
+```bash
+npm install -g kiro-cli
+```
+
+### 2. Login to Kiro
+
+```bash
+# Login via browser
+kiro auth login
+```
+
+### 3. Install the plugin
+
+```bash
+opencode plugin @firdyfirdy/opencode-multi-kiro
+```
+
+### 4. Connect provider in OpenCode
+
+```bash
+opencode
+# Then run: /connect
+# Select: kiro
+# Choose: Kiro (sync from kiro-cli)
+```
+
+### 5. Setup agent (optional)
+
+Add to `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "agent": {
+    "kiro-build": {
+      "mode": "primary",
+      "model": "kiro/claude-opus-4-6"
+    }
+  }
+}
+```
+
+Available models: `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-sonnet-4-5`, `claude-haiku-4-5`, etc.
+
+---
+
 ## Core Architecture
 
 ### 1) Embedded Plugin (No Gateway)
@@ -174,6 +238,21 @@ Practical fix:
 ### Email shows as `kiro-desktop-us-east-1`
 
 This is a fallback label when usage/email lookup fails. It usually indicates an invalid token or usage API failure.
+
+### Debug Mode
+
+For troubleshooting, enable debug logging:
+
+```bash
+# Log outbound payload before sending to Kiro
+DEBUG_KIRO_PAYLOAD=1 opencode
+
+# Log stream events from Kiro response
+DEBUG_KIRO_STREAM=1 opencode
+
+# Both
+DEBUG_KIRO_PAYLOAD=1 DEBUG_KIRO_STREAM=1 opencode
+```
 
 ---
 
