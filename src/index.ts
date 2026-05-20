@@ -70,6 +70,59 @@ function buildFallbackBody(original: any, tier: 1 | 2 | 3): any {
   return cloned
 }
 
+function redactPayloadPreview(payload: any): any {
+  if (!payload || typeof payload !== "object") return payload
+  const cloned = cloneJson(payload)
+  const uim = cloned?.conversationState?.currentMessage?.userInputMessage
+  if (uim && typeof uim.content === "string") {
+    uim.content = uim.content.slice(0, 400)
+  }
+  if (Array.isArray(cloned?.conversationState?.history)) {
+    for (const entry of cloned.conversationState.history) {
+      if (entry?.userInputMessage?.content && typeof entry.userInputMessage.content === "string") {
+        entry.userInputMessage.content = entry.userInputMessage.content.slice(0, 200)
+      }
+      if (entry?.assistantResponseMessage?.content && typeof entry.assistantResponseMessage.content === "string") {
+        entry.assistantResponseMessage.content = entry.assistantResponseMessage.content.slice(0, 200)
+      }
+    }
+  }
+  if (uim?.userInputMessageContext?.toolResults) {
+    uim.userInputMessageContext.toolResults = `[redacted:${uim.userInputMessageContext.toolResults.length}]`
+  }
+  return cloned
+}
+
+function logOutboundPayload(params: {
+  endpoint: string
+  accountId: string
+  region: string
+  reqModel: string
+  payload: any
+  attempt: "primary" | "fallback-1" | "fallback-2" | "fallback-3"
+}) {
+  if (process.env.DEBUG_KIRO_PAYLOAD !== "1") return
+  const { endpoint, accountId, region, reqModel, payload, attempt } = params
+  const uim = payload?.conversationState?.currentMessage?.userInputMessage
+  const uctx = uim?.userInputMessageContext
+  console.debug("kiro.outbound.request", {
+    endpoint,
+    accountId,
+    region,
+    model: reqModel,
+    attempt,
+    payloadMeta: {
+      hasSystemPrefix: typeof uim?.content === "string" && uim.content.includes("## ⚠️ System") ,
+      currentContentLength: typeof uim?.content === "string" ? uim.content.length : 0,
+      historyCount: Array.isArray(payload?.conversationState?.history) ? payload.conversationState.history.length : 0,
+      toolCount: Array.isArray(uctx?.tools) ? uctx.tools.length : 0,
+      toolResultCount: Array.isArray(uctx?.toolResults) ? uctx.toolResults.length : 0,
+      imageCount: Array.isArray(uim?.images) ? uim.images.length : 0,
+    },
+    payloadPreview: redactPayloadPreview(payload),
+  })
+}
+
 // --- Kiro request headers (from kiro-gateway: utils.py get_kiro_headers) ---
 
 function kiroHeaders(accessToken: string, profileArn?: string): Record<string, string> {
@@ -285,6 +338,17 @@ export const MultiKiroPlugin: Plugin = async (input: PluginInput) => {
                 requestBody = init?.body
               }
 
+              if (requestBody && typeof requestBody === "object") {
+                logOutboundPayload({
+                  endpoint,
+                  accountId: acc.id,
+                  region,
+                  reqModel,
+                  payload: requestBody,
+                  attempt: "primary",
+                })
+              }
+
               let res = await fetch(endpoint, {
                 method: "POST",
                 headers: hdrs,
@@ -298,6 +362,14 @@ export const MultiKiroPlugin: Plugin = async (input: PluginInput) => {
                   for (const tier of [1, 2, 3] as const) {
                     try {
                       const fb = buildFallbackBody(requestBody, tier)
+                      logOutboundPayload({
+                        endpoint,
+                        accountId: acc.id,
+                        region,
+                        reqModel,
+                        payload: fb,
+                        attempt: `fallback-${tier}` as const,
+                      })
                       res = await fetch(endpoint, {
                         method: "POST",
                         headers: hdrs,

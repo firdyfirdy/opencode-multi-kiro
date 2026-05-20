@@ -411,12 +411,13 @@ export function transformRequest(body: string | any, account: Account): any {
   const profileArn = account.profile_arn
   const thinkingConfig = resolveThinkingConfig(req)
 
-  // Extract system messages
+  // Extract system messages only.
+  // Keep developer messages in-turn to avoid giving them implicit system precedence.
   let systemPrompt = ""
   const nonSystemMessages: OpenAIMessage[] = []
 
   for (const msg of req.messages || []) {
-    if (msg.role === "system" || msg.role === "developer") {
+    if (msg.role === "system") {
       const text = extractText(msg.content)
       systemPrompt += (systemPrompt ? "\n\n" : "") + text
     } else {
@@ -432,25 +433,31 @@ export function transformRequest(body: string | any, account: Account): any {
   const alternated = ensureAlternation(unified)
 
   if (alternated.length === 0) {
-    alternated.push({ role: "user", content: "Continue" })
+    alternated.push({ role: "user", content: "" })
   }
 
-  // Split: last user message = current, rest = history
-  const lastIdx = alternated.length - 1
-  let currentMsg = alternated[lastIdx]
-  const historyMessages = alternated.slice(0, lastIdx)
+  // Split: select latest actual user message as current, preserve everything else as history.
+  // FIX: This prevents the "Continue" fallback bug that caused context loss.
+  let currentMsg: UnifiedMessage | undefined
+  let historyMessages: UnifiedMessage[] = []
+  for (let i = alternated.length - 1; i >= 0; i--) {
+    if (alternated[i].role === "user") {
+      currentMsg = alternated[i]
+      historyMessages = alternated.slice(0, i).concat(alternated.slice(i + 1))
+      break
+    }
+  }
 
-  // Ensure current is a user message
-  if (currentMsg.role !== "user") {
-    historyMessages.push(currentMsg)
-    currentMsg = { role: "user", content: "Continue" }
+  if (!currentMsg) {
+    currentMsg = { role: "user", content: "" }
+    historyMessages = [...alternated]
   }
 
   // Build history
   let history = buildHistory(historyMessages)
 
   // Inject thinking tags into current user content
-  let currentContent = currentMsg.content || "Continue"
+  let currentContent = currentMsg.content || ""
   if (thinkingConfig.enabled) {
     currentContent = injectThinkingTags(currentContent, thinkingConfig)
   }
