@@ -251,6 +251,7 @@ export const MultiKiroPlugin: Plugin = async (input: PluginInput) => {
           baseURL: resolvedBaseURL(defaultRegion),
           baseUrl: resolvedBaseURL(defaultRegion),
           async fetch(req: RequestInfo | URL, init?: RequestInit) {
+            console.error("[kiro.fetch] ENTER", typeof req === "string" ? req : req.toString())
             const attempted = new Set<string>()
             let state = await load(loc)
 
