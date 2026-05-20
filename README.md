@@ -138,7 +138,7 @@ In `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "plugin": ["/home/ubuntu/lab/plugins/opencode-multi-kiro"]
+  "plugin": ["/absolute/path/to/opencode-multi-kiro"]
 }
 ```
 
