@@ -190,6 +190,11 @@ export function transformResponseStream(kiroResponse: Response, model: string): 
             try {
               const event = JSON.parse(payload)
 
+              // Debug logging
+              if (process.env.DEBUG_KIRO_STREAM === "1") {
+                console.debug("kiro.stream.event", JSON.stringify(event).slice(0, 500))
+              }
+
               // Text content event
               if (event.content !== undefined && !event.toolUseId) {
                 const rawText = event.content as string
