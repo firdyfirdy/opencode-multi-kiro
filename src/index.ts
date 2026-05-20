@@ -153,6 +153,7 @@ function resolvedBaseURL(region: string): string {
 }
 
 export const MultiKiroPlugin: Plugin = async (input: PluginInput) => {
+  console.error("[kiro.plugin] INIT")
   const loc = file()
   const toast: ToastFn = (message, variant) => {
     try {
@@ -165,9 +166,11 @@ export const MultiKiroPlugin: Plugin = async (input: PluginInput) => {
 
   const current = await active(loc)
   const defaultRegion = current?.region || "us-east-1"
+  console.error("[kiro.plugin] defaultRegion:", defaultRegion, "activeAccount:", current?.email)
 
   return {
     config: async (cfg: any) => {
+      console.error("[kiro.config] ENTER", JSON.stringify(Object.keys(cfg)))
       if (!cfg.provider) cfg.provider = {}
       if (!cfg.provider[PROVIDER_ID]) cfg.provider[PROVIDER_ID] = {}
       const p = cfg.provider[PROVIDER_ID]
