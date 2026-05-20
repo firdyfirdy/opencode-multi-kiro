@@ -105,7 +105,7 @@ function logOutboundPayload(params: {
   const { endpoint, accountId, region, reqModel, payload, attempt } = params
   const uim = payload?.conversationState?.currentMessage?.userInputMessage
   const uctx = uim?.userInputMessageContext
-  console.debug("kiro.outbound.request", {
+  console.error("[kiro.outbound.request]", JSON.stringify({
     endpoint,
     accountId,
     region,
@@ -120,7 +120,7 @@ function logOutboundPayload(params: {
       imageCount: Array.isArray(uim?.images) ? uim.images.length : 0,
     },
     payloadPreview: redactPayloadPreview(payload),
-  })
+  }, null, 2))
 }
 
 // --- Kiro request headers (from kiro-gateway: utils.py get_kiro_headers) ---
