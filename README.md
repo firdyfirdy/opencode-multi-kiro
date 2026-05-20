@@ -1,135 +1,188 @@
-# opencode-multi-kiro
+# @firdyfirdy/opencode-multi-kiro
 
-[![npm version](https://img.shields.io/npm/v/@firdyfirdy/opencode-multi-kiro)](https://www.npmjs.com/package/@firdyfirdy/opencode-multi-kiro)
-[![license](https://img.shields.io/npm/l/@firdyfirdy/opencode-multi-kiro)](./LICENSE)
+OpenCode plugin to connect to Kiro **without a hosted gateway**.
 
-OpenCode plugin for multi-account Kiro with automatic rotation, usage tracking, and account management.
+The plugin runs directly inside the OpenCode process, intercepts OpenAI-compatible requests, and translates them into Kiro native requests (`/generateAssistantResponse`).
 
-## Features
+---
 
-- **Multi-account support** — Register and manage multiple Kiro accounts
-- **Auto-rotation** — Automatically rotate between accounts to distribute usage
-- **Usage tracking** — Track request counts and token usage per account
-- **kiro-cli sync** — Sync accounts and tokens from kiro-cli authentication
-- **Token refresh** — Automatic token refresh when credentials expire
-- **Account management** — Sync/add (via `kiro-cli`), remove, activate, and refresh accounts
-- **Exponential backoff** — Retry with exponential backoff on rate limits or transient errors
+## Core Architecture
 
-## Installation
+### 1) Embedded Plugin (No Gateway)
 
-Add the plugin to your `opencode.json` plugin array:
-
-```json
-{
-  "plugin": [
-    "@firdyfirdy/opencode-multi-kiro"
-  ]
-}
+```text
+OpenCode
+  -> plugin fetch hook (src/index.ts)
+  -> request transform (src/transform.ts)
+  -> Kiro runtime API call
+  -> AWS event stream parsing (src/stream.ts)
+  -> OpenAI SSE response back to OpenCode
 ```
 
-Then install:
+No separate Python server is required.
 
-```bash
-npm install @firdyfirdy/opencode-multi-kiro
+---
+
+### 2) Multi-Account Store
+
+Accounts are persisted in:
+
+```text
+~/.config/opencode/multi-kiro.json
 ```
 
-## Setup
+Stored fields include:
+- email
+- access_token
+- refresh_token
+- expires_at
+- health state (`is_healthy`, `last_error`, `cooldown_until`)
+- usage and request metrics
 
-1. **Login with kiro-cli**
+---
+
+### 3) Token Forking (Decoupled from kiro-cli)
+
+This is a key mechanism.
+
+When the plugin syncs a token from `kiro-cli`, it **immediately refreshes it once** to create its own token chain:
+
+```text
+kiro-cli token: RT-A
+      |
+      | sync + immediate refresh (fork)
+      v
+plugin token: RT-B (new rotated token)
+```
+
+Meaning:
+- `kiro-cli` keeps token A
+- plugin stores token B
+- plugin persists token B to `multi-kiro.json`
+
+Goal: plugin tokens are not tightly coupled to the exact token currently held by kiro-cli.
+
+> Note: if Kiro server revokes the entire session on logout, forked tokens may still become invalid. That behavior is server-side.
+
+---
+
+### 4) Rotating Refresh Tokens
+
+Kiro uses rotating refresh tokens. Each refresh does:
+
+```text
+RT-old -> refresh -> RT-new
+```
+
+The plugin always persists the latest `refresh_token` into `multi-kiro.json` after a successful refresh.
+
+---
+
+### 5) Account Rotation Strategy
+
+Strategy is stored in `multi-kiro.json`:
+- `round-robin`: rotates based on `last_used`
+- `hybrid`
+- `sticky`
+
+Accounts that fail refresh/request are marked unhealthy and skipped.
+
+---
+
+## Multi-Account Login Workflow
+
+This is the recommended real-world flow:
+
+1. Login on Kiro web first: `https://app.kiro.dev/`
+2. Run initial CLI login:
 
    ```bash
    kiro-cli login
    ```
 
-   This stores credentials that the plugin can sync from.
+3. If successful, run OpenCode auth login for the provider:
 
-2. **Auth file placeholder**
-
-   Create `~/.local/share/opencode/auth.json` if it doesn't exist:
-
-   ```json
-   {
-      "kiro": {
-        "type": "api",
-        "key": "placeholder"
-      }
-    }
+   ```bash
+   opencode auth login --provider kiro
    ```
 
-   Accounts will be populated automatically when you sync from `kiro-cli`.
+4. Choose:
+   - `Kiro (sync from kiro-cli)`
+   - (not `Manage Accounts` for initial import)
 
-3. **Configure the plugin**
+5. Use OpenCode normally.
 
-   In your `opencode.json`:
+### Adding another account
 
-   ```json
-   {
-      "plugin": [
-        "@firdyfirdy/opencode-multi-kiro"
-      ],
-      "multi-kiro": {
-        "strategy": "hybrid"
-      }
-   }
+Because `kiro-cli` usually handles one active account session at a time, add accounts iteratively:
+
+1. Logout current account in CLI:
+
+   ```bash
+   kiro-cli logout
    ```
 
-## Configuration
+2. Repeat the same login/import flow:
+   - login at `https://app.kiro.dev/`
+   - `kiro-cli login`
+   - `opencode auth login --provider kiro`
+   - choose `Kiro (sync from kiro-cli)`
 
-| Option     | Type   | Default  | Description                          |
-|------------|--------|----------|--------------------------------------|
-| `strategy` | string | `hybrid` | Account rotation strategy to use     |
+This imports the newly logged-in account into `multi-kiro.json`.
 
-### Rotation Strategies
+---
 
-- **`hybrid`** — Combines round-robin with usage-aware selection. Prefers accounts with lower usage, falls back to round-robin when usage is balanced.
-- **`round-robin`** — Cycles through accounts sequentially in order.
-- **`sticky`** — Sticks to a single account until it hits a rate limit or error, then switches.
+## Install (Local Path)
 
-## Available Models
-
-| Model ID              | Description                  |
-|-----------------------|------------------------------|
-| `auto`                | Automatic model selection    |
-| `claude-sonnet-4-5`   | Claude Sonnet 4.5            |
-| `claude-sonnet-4-6`   | Claude Sonnet 4.6            |
-| `claude-sonnet-4`     | Claude Sonnet 4              |
-| `claude-haiku-4-5`    | Claude Haiku 4.5             |
-| `claude-opus-4-5`     | Claude Opus 4.5              |
-| `claude-opus-4-6`     | Claude Opus 4.6              |
-| `claude-opus-4-7`     | Claude Opus 4.7              |
-| `minimax-m2.5`        | MiniMax M2.5                 |
-| `minimax-m2.1`        | MiniMax M2.1                 |
-| `qwen3-coder-next`    | Qwen3 Coder Next             |
-
-## Local Development
-
-Build the plugin:
-
-```bash
-bun run build
-```
-
-Use a local file path in your `opencode.json` for development:
+In `~/.config/opencode/opencode.json`:
 
 ```json
 {
-    "plugin": [
-      "file:///path/to/opencode-multi-kiro/dist/index.js"
-    ]
+  "plugin": ["/home/ubuntu/lab/plugins/opencode-multi-kiro"]
 }
 ```
 
+Then restart OpenCode.
+
+---
+
+## Build
+
+```bash
+bun install
+bun run build
+```
+
+---
+
 ## Troubleshooting
 
-- **Accounts not syncing** — Run `kiro-cli login`, then use `Manage Accounts -> Add account (sync kiro-cli)`.
-- **Token refresh failing** — Check that your refresh tokens haven't been revoked. Re-run `kiro-cli login` to re-authenticate.
-- **Rate limit errors** — The plugin retries with exponential backoff automatically. If errors persist, add more accounts or switch to `round-robin` strategy.
-- **Plugin not loading** — Verify the plugin is listed in your `opencode.json` `plugins` array and that the package is installed.
+### Only one account keeps getting used
 
-## License
+Check `~/.config/opencode/multi-kiro.json`:
+- other accounts may be `is_healthy: false`
+- `last_error` is often `token_refresh_failed`
 
-[MIT](./LICENSE)
+Common causes:
+- refresh token has been revoked/expired
+- account has not been synced from the latest `kiro-cli` login session
 
-## Author
+Practical fix:
+- run `opencode auth login --provider kiro`
+- choose `Kiro (sync from kiro-cli)` after each fresh `kiro-cli login`
 
-firdyfirdy
+### Email shows as `kiro-desktop-us-east-1`
+
+This is a fallback label when usage/email lookup fails. It usually indicates an invalid token or usage API failure.
+
+---
+
+## Source Map
+
+- `src/index.ts` — plugin hooks, account selection, retries, toast
+- `src/auth.ts` — kiro-cli sync, token refresh, token forking
+- `src/transform.ts` — OpenAI request -> Kiro payload
+- `src/stream.ts` — AWS binary stream -> OpenAI SSE
+- `src/store.ts` — JSON registry persistence
+- `src/router.ts` — rotation strategy
+- `src/fail.ts` — error classification

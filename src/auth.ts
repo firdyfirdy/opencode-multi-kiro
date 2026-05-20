@@ -25,7 +25,7 @@ function getOldKiroDbPath(): string {
   return join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "opencode", "kiro.db")
 }
 
-// --- Kiro runtime endpoints ---
+// --- Kiro runtime endpoints (from kiro-gateway: config.py) ---
 
 const KIRO_REFRESH_URL = (region: string) =>
   `https://prod.${region}.auth.desktop.kiro.dev/refreshToken`
@@ -37,6 +37,29 @@ const KIRO_API_HOST = (region: string) =>
   `https://runtime.${region}.kiro.dev`
 
 export { KIRO_API_HOST }
+
+// --- Fingerprint generation (from kiro-gateway: utils.py) ---
+
+function generateFingerprint(): string {
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+  let result = ""
+  for (let i = 0; i < 12; i++) {
+    result += chars[Math.floor(Math.random() * chars.length)]
+  }
+  return result
+}
+
+const FINGERPRINT = generateFingerprint()
+
+// --- User-Agent (from kiro-gateway: utils.py) ---
+
+export function getKiroUserAgent(): string {
+  return `aws-sdk-js/1.0.27 os/linux lang/js md/nodejs#v22.0.0 KiroIDE-0.7.45-${FINGERPRINT}`
+}
+
+// --- Token refresh threshold (from kiro-gateway: TOKEN_REFRESH_THRESHOLD = 600s) ---
+
+const TOKEN_REFRESH_THRESHOLD_MS = 600_000 // 10 minutes before expiry
 
 // --- Sync from kiro-cli SQLite ---
 
@@ -100,11 +123,25 @@ async function syncFromKiroCliDb(toast?: ToastFn): Promise<number> {
       const oidcRegion = row.sso_region || region
       const authMethod: AuthMethod = row.client_id ? "idc" : "desktop"
 
+      // CRITICAL: Immediately refresh to fork the token chain.
+      // This gives the plugin its own independent refresh token,
+      // so kiro-cli logout won't invalidate our token.
+      let accessToken = row.access_token
+      let refreshToken = row.refresh_token
+      let expiresAt = row.expires_at || Date.now() + 3600_000
+
+      const forked = await forkTokenChain(refreshToken, authMethod, oidcRegion, row.client_id, row.client_secret)
+      if (forked) {
+        accessToken = forked.accessToken
+        refreshToken = forked.refreshToken
+        expiresAt = forked.expiresAt
+      }
+
       // Try to fetch email + usage from Kiro API
       let email: string | undefined
       let usedCount: number | undefined
       let limitCount: number | undefined
-      const usageInfo = await fetchUsageAndEmail(row.access_token, region, row.profile_arn)
+      const usageInfo = await fetchUsageAndEmail(accessToken, region, row.profile_arn)
       if (usageInfo) {
         email = usageInfo.email
         usedCount = usageInfo.used
@@ -123,9 +160,9 @@ async function syncFromKiroCliDb(toast?: ToastFn): Promise<number> {
         client_secret: row.client_secret,
         profile_arn: row.profile_arn,
         start_url: row.start_url,
-        access_token: row.access_token,
-        refresh_token: row.refresh_token,
-        expires_at: row.expires_at || Date.now() + 3600_000,
+        access_token: accessToken,
+        refresh_token: refreshToken,
+        expires_at: expiresAt,
         is_healthy: true,
         consecutive_failures: 0,
         usage: usedCount != null && limitCount != null
@@ -231,7 +268,7 @@ function readKiroCliTokens(db: any): KiroCliRow[] {
     let stateMap = new Map<string, string>()
     try {
       const stateRows = db.prepare("SELECT key, value FROM state").all() as { key: string; value: string }[]
-      stateMap = new Map(stateRows.map((r) => [r.key, r.value]))
+      stateMap = new Map(stateRows.map((r: any) => [r.key, r.value]))
     } catch {}
 
     // Read auth_kv table for tokens (newer kiro-cli uses this)
@@ -320,11 +357,69 @@ function readKiroCliTokens(db: any): KiroCliRow[] {
   return results
 }
 
-// --- Token refresh ---
+// --- Token chain forking ---
+
+/**
+ * Fork the token chain by immediately refreshing.
+ * This gives the plugin its own independent refresh token,
+ * so when kiro-cli does logout (which revokes the original token),
+ * the plugin's forked chain remains valid.
+ * 
+ * Kiro uses rotating refresh tokens — each refresh returns a NEW refresh token
+ * and invalidates the old one. By refreshing immediately on sync, we "fork"
+ * the chain: kiro-cli keeps its token, plugin gets a new one.
+ */
+async function forkTokenChain(
+  refreshToken: string,
+  authMethod: AuthMethod,
+  region: string,
+  clientId?: string,
+  clientSecret?: string,
+): Promise<{ accessToken: string; refreshToken: string; expiresAt: number } | null> {
+  try {
+    if (authMethod === "idc" && clientId && clientSecret) {
+      const url = KIRO_OIDC_URL(region)
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "User-Agent": getKiroUserAgent() },
+        body: JSON.stringify({
+          grantType: "refresh_token",
+          clientId,
+          clientSecret,
+          refreshToken,
+        }),
+      })
+      if (!res.ok) return null
+      const data = (await res.json()) as any
+      const newAccess = data.accessToken || data.access_token
+      const newRefresh = data.refreshToken || data.refresh_token || refreshToken
+      const expiresIn = data.expiresIn || data.expires_in || 3600
+      return { accessToken: newAccess, refreshToken: newRefresh, expiresAt: Date.now() + expiresIn * 1000 }
+    } else {
+      // Desktop auth
+      const url = KIRO_REFRESH_URL(region)
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "User-Agent": getKiroUserAgent() },
+        body: JSON.stringify({ refreshToken }),
+      })
+      if (!res.ok) return null
+      const data = (await res.json()) as any
+      const newAccess = data.accessToken || data.access_token
+      const newRefresh = data.refreshToken || data.refresh_token || refreshToken
+      const expiresIn = data.expiresIn || data.expires_in || 3600
+      return { accessToken: newAccess, refreshToken: newRefresh, expiresAt: Date.now() + expiresIn * 1000 }
+    }
+  } catch {
+    return null
+  }
+}
+
+// --- Token refresh (from kiro-gateway: auth.py) ---
 
 /**
  * Refresh access token for an account.
- * Returns new token response or null on failure.
+ * Uses proper User-Agent header matching kiro-gateway.
  */
 export async function refreshToken(account: Account): Promise<TokenResponse | null> {
   if (account.auth_method === "desktop") {
@@ -336,6 +431,11 @@ export async function refreshToken(account: Account): Promise<TokenResponse | nu
   return null
 }
 
+/**
+ * Desktop auth refresh (from kiro-gateway: KiroAuthManager._refresh_desktop)
+ * Uses Kiro desktop auth endpoint with proper User-Agent.
+ * Returns new refresh token (rotating tokens).
+ */
 async function refreshDesktopToken(account: Account): Promise<TokenResponse | null> {
   const region = account.oidc_region || account.region || "us-east-1"
   const url = KIRO_REFRESH_URL(region)
@@ -343,15 +443,19 @@ async function refreshDesktopToken(account: Account): Promise<TokenResponse | nu
   try {
     const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": getKiroUserAgent(),
+      },
       body: JSON.stringify({ refreshToken: account.refresh_token }),
     })
 
     if (!res.ok) return null
 
-    const data = await res.json() as any
+    const data = (await res.json()) as any
     return {
       accessToken: data.accessToken || data.access_token,
+      refreshToken: data.refreshToken || data.refresh_token,
       expiresAt: data.expiresAt,
       expiresIn: data.expiresIn || data.expires_in,
     }
@@ -360,14 +464,22 @@ async function refreshDesktopToken(account: Account): Promise<TokenResponse | nu
   }
 }
 
-async function refreshOidcToken(account: Account): Promise<TokenResponse | null> {
+/**
+ * OIDC auth refresh (from kiro-gateway: KiroAuthManager._refresh_sso_oidc)
+ * Handles 400 retry by attempting once more.
+ * Returns new refresh token (rotating tokens).
+ */
+async function refreshOidcToken(account: Account, retried = false): Promise<TokenResponse | null> {
   const region = account.oidc_region || account.region || "us-east-1"
   const url = KIRO_OIDC_URL(region)
 
   try {
     const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": getKiroUserAgent(),
+      },
       body: JSON.stringify({
         grantType: "refresh_token",
         clientId: account.client_id,
@@ -376,11 +488,18 @@ async function refreshOidcToken(account: Account): Promise<TokenResponse | null>
       }),
     })
 
-    if (!res.ok) return null
+    if (!res.ok) {
+      // Retry once on 400 (from kiro-gateway pattern)
+      if (res.status === 400 && !retried) {
+        return refreshOidcToken(account, true)
+      }
+      return null
+    }
 
-    const data = await res.json() as any
+    const data = (await res.json()) as any
     return {
       accessToken: data.accessToken || data.access_token,
+      refreshToken: data.refreshToken || data.refresh_token,
       expiresAt: data.expiresAt,
       expiresIn: data.expiresIn || data.expires_in,
     }
@@ -391,52 +510,34 @@ async function refreshOidcToken(account: Account): Promise<TokenResponse | null>
 
 /**
  * Ensure account has a valid (non-expired) access token.
- * Refreshes if needed and updates store.
+ * Uses 10-minute threshold (from kiro-gateway: TOKEN_REFRESH_THRESHOLD = 600).
+ * Saves new refresh token (rotating tokens) to persist the chain.
  */
 export async function ensureFreshToken(loc: string, account: Account): Promise<Account> {
-  const bufferMs = 120_000 // refresh 2 min before expiry
-  if (account.expires_at > Date.now() + bufferMs) return account
+  if (account.expires_at > Date.now() + TOKEN_REFRESH_THRESHOLD_MS) return account
 
   const result = await refreshToken(account)
   if (!result) {
     // Mark unhealthy if refresh fails
     await mark(loc, account.id, { is_healthy: false, last_error: "token_refresh_failed" })
-    return account
+    return { ...account, is_healthy: false }
   }
 
   const expiresAt = result.expiresAt || (result.expiresIn ? Date.now() + result.expiresIn * 1000 : Date.now() + 3600_000)
+  const newRefreshToken = result.refreshToken || account.refresh_token
+
   await mark(loc, account.id, {
     access_token: result.accessToken,
+    refresh_token: newRefreshToken,
     expires_at: expiresAt,
     is_healthy: true,
   })
 
-  return { ...account, access_token: result.accessToken, expires_at: expiresAt }
+  return { ...account, access_token: result.accessToken, refresh_token: newRefreshToken, expires_at: expiresAt, is_healthy: true }
 }
 
 // --- Usage fetch ---
 
-/**
- * Fetch usage/credits info for an account.
- * Returns Usage or null on failure.
- */
 export async function fetchUsage(account: Account): Promise<Usage | null> {
-  // Kiro doesn't have a public usage API like OpenAI.
-  // We track usage locally via request_count.
-  // If a usage endpoint becomes available, implement here.
-  // For now, return synthetic usage from local metrics.
   return null
-}
-
-/** Safely fetch email from token (best-effort) */
-async function fetchEmailSafe(accessToken: string): Promise<string | undefined> {
-  // Try to decode JWT payload for email
-  try {
-    const parts = accessToken.split(".")
-    if (parts.length < 2) return undefined
-    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString())
-    return payload.email || payload.sub || undefined
-  } catch {
-    return undefined
-  }
 }

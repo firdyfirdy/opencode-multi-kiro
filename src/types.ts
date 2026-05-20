@@ -59,6 +59,7 @@ export interface Registry {
 /** Token response from Kiro refresh endpoints */
 export interface TokenResponse {
   accessToken: string
+  refreshToken?: string
   expiresAt?: number
   expiresIn?: number
 }
