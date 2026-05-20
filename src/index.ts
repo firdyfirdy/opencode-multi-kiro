@@ -174,9 +174,10 @@ export const MultiKiroPlugin: Plugin = async (input: PluginInput) => {
       if (!cfg.provider) cfg.provider = {}
       if (!cfg.provider[PROVIDER_ID]) cfg.provider[PROVIDER_ID] = {}
       const p = cfg.provider[PROVIDER_ID]
-      p.npm = "@ai-sdk/openai-compatible"
-      p.baseURL = resolvedBaseURL(defaultRegion)
-      p.baseUrl = resolvedBaseURL(defaultRegion)
+      // Don't set npm - let auth hook handle everything
+      // p.npm = "@ai-sdk/openai-compatible"
+      // p.baseURL = resolvedBaseURL(defaultRegion)
+      // p.baseUrl = resolvedBaseURL(defaultRegion)
       if (!p.models) {
         p.models = {
           "auto": {
