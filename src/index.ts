@@ -153,7 +153,6 @@ function resolvedBaseURL(region: string): string {
 }
 
 export const MultiKiroPlugin: Plugin = async (input: PluginInput) => {
-  console.error("[kiro.plugin] INIT")
   const loc = file()
   const toast: ToastFn = (message, variant) => {
     try {
@@ -166,11 +165,9 @@ export const MultiKiroPlugin: Plugin = async (input: PluginInput) => {
 
   const current = await active(loc)
   const defaultRegion = current?.region || "us-east-1"
-  console.error("[kiro.plugin] defaultRegion:", defaultRegion, "activeAccount:", current?.email)
 
   return {
     config: async (cfg: any) => {
-      console.error("[kiro.config] ENTER", JSON.stringify(Object.keys(cfg)))
       if (!cfg.provider) cfg.provider = {}
       if (!cfg.provider[PROVIDER_ID]) cfg.provider[PROVIDER_ID] = {}
       const p = cfg.provider[PROVIDER_ID]
@@ -242,7 +239,6 @@ export const MultiKiroPlugin: Plugin = async (input: PluginInput) => {
     auth: {
       provider: PROVIDER_ID,
       async loader(getAuth: any) {
-        console.error("[kiro.auth.loader] ENTER")
         await getAuth()
 
         // Sync on every loader invocation if no accounts
@@ -251,13 +247,11 @@ export const MultiKiroPlugin: Plugin = async (input: PluginInput) => {
           await syncFromKiroCli(toast)
         }
 
-        console.error("[kiro.auth.loader] returning fetch handler")
         return {
           apiKey: "kiro",
           baseURL: resolvedBaseURL(defaultRegion),
           baseUrl: resolvedBaseURL(defaultRegion),
           async fetch(req: RequestInfo | URL, init?: RequestInit) {
-            console.error("[kiro.fetch] ENTER", typeof req === "string" ? req : req.toString())
             const attempted = new Set<string>()
             let state = await load(loc)
 
