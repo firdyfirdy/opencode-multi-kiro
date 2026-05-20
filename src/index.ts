@@ -241,6 +241,7 @@ export const MultiKiroPlugin: Plugin = async (input: PluginInput) => {
     auth: {
       provider: PROVIDER_ID,
       async loader(getAuth: any) {
+        console.error("[kiro.auth.loader] ENTER")
         await getAuth()
 
         // Sync on every loader invocation if no accounts
@@ -249,6 +250,7 @@ export const MultiKiroPlugin: Plugin = async (input: PluginInput) => {
           await syncFromKiroCli(toast)
         }
 
+        console.error("[kiro.auth.loader] returning fetch handler")
         return {
           apiKey: "kiro",
           baseURL: resolvedBaseURL(defaultRegion),
