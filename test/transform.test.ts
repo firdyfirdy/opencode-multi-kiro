@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test"
-import { transformRequest } from "../src/transform.js"
+import { repairHistoryToolPairs, transformRequest } from "../src/transform.js"
 
 const mockAccount: any = {
   profile_arn: "arn:aws:codewhisperer:us-east-1:123456789012:profile/test",
@@ -50,5 +50,65 @@ describe("transformRequest context preservation", () => {
     const payload = transformRequest({ model: "claude-sonnet-4-5", messages: [] }, mockAccount)
     const current = payload?.conversationState?.currentMessage?.userInputMessage?.content || ""
     expect(current).not.toContain("Continue")
+  })
+})
+
+describe("repairHistoryToolPairs", () => {
+  it("drops orphaned toolResults left behind after front-trimming removed their toolUse", () => {
+    // Front-trimming shifted off the assistant turn that carried toolUseId "t1",
+    // leaving a user turn with a toolResult that now points nowhere.
+    const history = [
+      {
+        userInputMessage: {
+          content: "here is the result",
+          userInputMessageContext: {
+            toolResults: [{ toolUseId: "t1", content: [{ text: "done" }], status: "success" }],
+          },
+        },
+      },
+    ]
+
+    const repaired = repairHistoryToolPairs(history)
+
+    expect(repaired[0].userInputMessage.userInputMessageContext).toBeUndefined()
+  })
+
+  it("shifts history to start on a user turn when it begins with an assistant turn", () => {
+    const history = [
+      { assistantResponseMessage: { content: "stray assistant turn", toolUses: [] } },
+      { userInputMessage: { content: "first real user turn" } },
+    ]
+
+    const repaired = repairHistoryToolPairs(history)
+
+    expect(repaired.length).toBe(1)
+    expect(repaired[0].userInputMessage.content).toBe("first real user turn")
+  })
+
+  it("preserves a toolResult whose matching toolUse is still present earlier in history", () => {
+    const history = [
+      { userInputMessage: { content: "do the thing" } },
+      {
+        assistantResponseMessage: {
+          content: "",
+          toolUses: [{ toolUseId: "t1", name: "foo", input: {} }],
+        },
+      },
+      {
+        userInputMessage: {
+          content: "here is the result",
+          userInputMessageContext: {
+            toolResults: [{ toolUseId: "t1", content: [{ text: "done" }], status: "success" }],
+          },
+        },
+      },
+    ]
+
+    const repaired = repairHistoryToolPairs(history)
+
+    expect(repaired.length).toBe(3)
+    expect(repaired[2].userInputMessage.userInputMessageContext.toolResults).toEqual([
+      { toolUseId: "t1", content: [{ text: "done" }], status: "success" },
+    ])
   })
 })

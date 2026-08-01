@@ -541,14 +541,62 @@ export function transformRequest(body: string | any, account: Account): any {
   if (payloadStr.length > KIRO_MAX_PAYLOAD_BYTES && history.length > 0) {
     while (payload.conversationState.history && payload.conversationState.history.length > 0) {
       payload.conversationState.history.shift()
+      repairHistoryToolPairs(payload.conversationState.history)
       if (JSON.stringify(payload).length <= KIRO_MAX_PAYLOAD_BYTES) break
     }
     if (payload.conversationState.history?.length === 0) {
       delete payload.conversationState.history
     }
   }
+  repairHistoryToolPairs(payload.conversationState.history)
+  if (payload.conversationState.history?.length === 0) {
+    delete payload.conversationState.history
+  }
 
   return payload
+}
+
+// --- Repair orphaned tool pairs after history trimming ---
+// Trimming history from the front can drop an assistant turn that carried
+// toolUses while keeping the following user turn that carried the matching
+// toolResults. Kiro then rejects the request with "unexpected tool_use_id
+// found in tool_result blocks". Re-establish the invariant: history starts
+// on a user turn, and every toolResult has a preceding toolUse.
+
+export function repairHistoryToolPairs(history: any[]): any[] {
+  if (!Array.isArray(history) || history.length === 0) return history
+
+  // 1) history must begin with a user turn (Kiro requires alternation)
+  while (history.length > 0 && !history[0]?.userInputMessage) {
+    history.shift()
+  }
+
+  // 2) drop toolResults whose toolUse is no longer present earlier in history
+  const seenUseIds = new Set<string>()
+  for (const entry of history) {
+    const ctx = entry?.userInputMessage?.userInputMessageContext
+    const results = ctx?.toolResults
+    if (Array.isArray(results)) {
+      const kept = results.filter((r: any) => r?.toolUseId && seenUseIds.has(r.toolUseId))
+      if (kept.length !== results.length) {
+        if (kept.length > 0) {
+          ctx.toolResults = kept
+        } else {
+          delete ctx.toolResults
+          if (Object.keys(ctx).length === 0) delete entry.userInputMessage.userInputMessageContext
+        }
+      }
+    }
+
+    const uses = entry?.assistantResponseMessage?.toolUses
+    if (Array.isArray(uses)) {
+      for (const u of uses) {
+        if (u?.toolUseId) seenUseIds.add(u.toolUseId)
+      }
+    }
+  }
+
+  return history
 }
 
 // --- Helper: collect tool names from history ---
